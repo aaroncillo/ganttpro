@@ -3,342 +3,169 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useProjectStore } from "@/stores/useProjectStore";
-import {
-  colors,
-  GROUP_COLORS,
-  TASK_STATUS,
-  GANTT,
-} from "@/lib/constants";
-import {
-  formatISO,
-  addDays,
-  diffDays,
-  formatShort,
-  formatMonthYear,
-  todayISO,
-  uid,
-} from "@/lib/utils";
+import { colors, GROUP_COLORS, TASK_STATUS, GANTT } from "@/lib/constants";
+import { formatISO, addDays, diffDays, todayISO, uid } from "@/lib/utils";
 import type { Task, TaskStatus } from "@/types";
-import {
-  Plus,
-  ZoomIn,
-  ZoomOut,
-  ChevronDown,
-  ChevronRight,
-  X,
-  Trash2,
-} from "lucide-react";
-import { parseISO, startOfMonth, endOfMonth, addMonths, getDaysInMonth } from "date-fns";
+import { Plus, ZoomIn, ZoomOut, Clock, X, Trash2 } from "lucide-react";
+import { parseISO, startOfMonth, endOfMonth, addMonths, format } from "date-fns";
+import { es } from "date-fns/locale";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-interface DragState {
-  type: "move" | "resize-left" | "resize-right";
-  taskId: string;
-  startX: number;
-  origStart: string;
-  origEnd: string;
-}
+const TASK_PANEL_W = 330;   // total left panel width
+const COL_NAME_W   = 170;   // TAREA column
+const COL_DATE_W   = 80;    // Inicio / Fin columns
+const HDR_MONTH_H  = 28;    // month header row height
+const HDR_WEEK_H   = 26;    // week header row height
+const HDR_H        = HDR_MONTH_H + HDR_WEEK_H;
 
-interface ModalState {
-  mode: "add" | "edit";
-  task?: Task;
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-interface GanttRange {
-  start: string;
-  end: string;
-  days: number;
-}
+const fmtD = (d: string) => format(parseISO(d), "dd-MMM.", { locale: es });
 
-interface GanttMonth {
-  label: string;
-  startOff: number;
-  days: number;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+interface GanttRange { start: string; end: string; days: number }
+interface GanttMonth { label: string; startOff: number; days: number }
+interface WeekTick   { label: string; offset: number }
 
 function buildRange(tasks: Task[]): GanttRange {
-  if (tasks.length === 0) {
-    const today = todayISO();
-    return {
-      start: addDays(today, -GANTT.PADDING_DAYS_BEFORE),
-      end: addDays(today, GANTT.PADDING_DAYS_AFTER + 60),
-      days: GANTT.PADDING_DAYS_BEFORE + GANTT.PADDING_DAYS_AFTER + 60,
-    };
+  if (!tasks.length) {
+    const t = todayISO();
+    return { start: addDays(t, -30), end: addDays(t, 90), days: 120 };
   }
-  const starts = tasks.map((t) => t.start).sort();
-  const ends = tasks.map((t) => t.end).sort();
-  const minStart = starts[0];
-  const maxEnd = ends[ends.length - 1];
-  const rangeStart = addDays(minStart, -GANTT.PADDING_DAYS_BEFORE);
-  const rangeEnd = addDays(maxEnd, GANTT.PADDING_DAYS_AFTER);
-  const days = diffDays(rangeStart, rangeEnd);
-  return { start: rangeStart, end: rangeEnd, days };
+  const s = tasks.map(t => t.start).sort()[0];
+  const e = tasks.map(t => t.end).sort().at(-1)!;
+  const start = addDays(s, -GANTT.PADDING_DAYS_BEFORE);
+  const end   = addDays(e, GANTT.PADDING_DAYS_AFTER);
+  return { start, end, days: diffDays(start, end) };
 }
 
-function buildMonths(range: GanttRange): GanttMonth[] {
-  const months: GanttMonth[] = [];
-  const rangeStart = parseISO(range.start);
-  let cursor = startOfMonth(rangeStart);
-
-  while (formatISO(cursor) <= range.end) {
-    const monthEnd = endOfMonth(cursor);
-    const visStart = cursor < rangeStart ? rangeStart : cursor;
-    const visEnd = monthEnd > parseISO(range.end) ? parseISO(range.end) : monthEnd;
-
-    const startOff = Math.max(0, diffDays(range.start, formatISO(visStart)));
-    const daysInMonth = diffDays(formatISO(visStart), formatISO(visEnd)) + 1;
-
-    months.push({
-      label: formatMonthYear(cursor),
-      startOff,
-      days: daysInMonth,
+function buildMonths(r: GanttRange): GanttMonth[] {
+  const result: GanttMonth[] = [];
+  const rs = parseISO(r.start);
+  const re = parseISO(r.end);
+  let cur = startOfMonth(rs);
+  while (cur <= re) {
+    const mEnd   = endOfMonth(cur);
+    const visS   = cur < rs ? rs : cur;
+    const visE   = mEnd > re ? re : mEnd;
+    result.push({
+      label:    format(cur, "MMM. yyyy", { locale: es }),
+      startOff: Math.max(0, diffDays(r.start, formatISO(visS))),
+      days:     diffDays(formatISO(visS), formatISO(visE)) + 1,
     });
-
-    cursor = addMonths(cursor, 1);
-  }
-  return months;
-}
-
-function getGroups(tasks: Task[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const t of tasks) {
-    if (!seen.has(t.group)) {
-      seen.add(t.group);
-      result.push(t.group);
-    }
+    cur = addMonths(cur, 1);
   }
   return result;
 }
 
-function getGroupColor(groups: string[], groupName: string): string {
-  const idx = groups.indexOf(groupName);
-  return GROUP_COLORS[idx % GROUP_COLORS.length];
+function buildWeeks(r: GanttRange): WeekTick[] {
+  const ticks: WeekTick[] = [];
+  for (let i = 0; i < r.days; i += 7) {
+    const d = parseISO(addDays(r.start, i));
+    ticks.push({ label: format(d, "dd-MMM.", { locale: es }), offset: i });
+  }
+  return ticks;
+}
+
+function getGroups(tasks: Task[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const t of tasks) if (!seen.has(t.group)) { seen.add(t.group); result.push(t.group); }
+  return result;
+}
+
+function groupColor(groups: string[], g: string) {
+  return GROUP_COLORS[groups.indexOf(g) % GROUP_COLORS.length];
 }
 
 // ─── Task Modal ───────────────────────────────────────────────────────────────
 
 function TaskModal({
-  modalState,
-  projectId,
-  existingGroups,
-  onClose,
+  mode, task, projectId, existingGroups, onClose,
 }: {
-  modalState: ModalState;
+  mode: "add" | "edit";
+  task?: Task;
   projectId: string;
   existingGroups: string[];
   onClose: () => void;
 }) {
   const { addTask, updateTask, deleteTask } = useProjectStore();
   const today = todayISO();
-  const isEdit = modalState.mode === "edit";
-  const initial = modalState.task;
+  const [name,     setName]     = useState(task?.name     ?? "");
+  const [group,    setGroup]    = useState(task?.group    ?? existingGroups[0] ?? "");
+  const [start,    setStart]    = useState(task?.start    ?? today);
+  const [end,      setEnd]      = useState(task?.end      ?? addDays(today, 7));
+  const [progress, setProgress] = useState(task?.progress ?? 0);
+  const [status,   setStatus]   = useState<TaskStatus>(task?.status ?? "pending");
 
-  const [name, setName] = useState(initial?.name ?? "");
-  const [group, setGroup] = useState(initial?.group ?? existingGroups[0] ?? "");
-  const [start, setStart] = useState(initial?.start ?? today);
-  const [end, setEnd] = useState(initial?.end ?? addDays(today, 7));
-  const [progress, setProgress] = useState(initial?.progress ?? 0);
-  const [status, setStatus] = useState<TaskStatus>(initial?.status ?? "pending");
-
-  const handleSave = () => {
+  const save = () => {
     if (!name.trim()) return;
-    const payload = { name: name.trim(), group: group || "General", start, end, progress, status };
-    if (isEdit && initial) {
-      updateTask(projectId, initial.id, payload);
-    } else {
-      addTask(projectId, payload);
-    }
+    const p = { name: name.trim(), group: group || "General", start, end, progress, status };
+    if (mode === "edit" && task) updateTask(projectId, task.id, p);
+    else addTask(projectId, p);
     onClose();
   };
 
-  const handleDelete = () => {
-    if (isEdit && initial) {
-      deleteTask(projectId, initial.id);
-      onClose();
-    }
-  };
+  const inp = "w-full rounded-xl px-3 py-2 text-sm outline-none border";
+  const inpStyle = { background: colors.surfaceHover, borderColor: colors.border, color: colors.text };
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.7)" }}
+      style={{ background: "rgba(0,0,0,0.75)" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div
-        className="w-full max-w-[480px] rounded-2xl border p-6"
-        style={{ background: colors.surface, borderColor: colors.border }}
-      >
-        {/* Header */}
+      <div className="w-full max-w-[460px] rounded-2xl border p-6" style={{ background: colors.surface, borderColor: colors.borderLight }}>
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-sm font-semibold" style={{ color: colors.text }}>
-            {isEdit ? "Editar Tarea" : "Nueva Tarea"}
+            {mode === "edit" ? "Editar Tarea" : "Nueva Tarea"}
           </h2>
-          <button onClick={onClose} style={{ color: colors.textTertiary }}>
-            <X className="h-4 w-4" strokeWidth={2} />
-          </button>
+          <button onClick={onClose} style={{ color: colors.textTertiary }}><X className="h-4 w-4" /></button>
         </div>
 
-        {/* Fields */}
-        <div className="space-y-4">
-          {/* Name */}
+        <div className="space-y-3">
           <div>
-            <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>
-              Nombre
-            </label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
-              style={{
-                background: colors.surfaceHover,
-                borderColor: colors.border,
-                color: colors.text,
-              }}
-              placeholder="Nombre de la tarea..."
-              autoFocus
-            />
+            <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>Nombre</label>
+            <input type="text" value={name} onChange={e => setName(e.target.value)} className={inp} style={inpStyle} placeholder="Nombre de la tarea..." autoFocus />
           </div>
-
-          {/* Group */}
           <div>
-            <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>
-              Grupo / Fase
-            </label>
-            <input
-              type="text"
-              value={group}
-              onChange={(e) => setGroup(e.target.value)}
-              list="group-options"
-              className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
-              style={{
-                background: colors.surfaceHover,
-                borderColor: colors.border,
-                color: colors.text,
-              }}
-              placeholder="Ingeniería, Procura, Montaje..."
-            />
-            <datalist id="group-options">
-              {existingGroups.map((g) => (
-                <option key={g} value={g} />
-              ))}
-            </datalist>
+            <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>Grupo / Fase</label>
+            <input type="text" value={group} onChange={e => setGroup(e.target.value)} list="grp" className={inp} style={inpStyle} placeholder="Ingeniería, Procura, Montaje..." />
+            <datalist id="grp">{existingGroups.map(g => <option key={g} value={g} />)}</datalist>
           </div>
-
-          {/* Dates */}
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>
-                Inicio
-              </label>
-              <input
-                type="date"
-                value={start}
-                onChange={(e) => setStart(e.target.value)}
-                className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
-                style={{
-                  background: colors.surfaceHover,
-                  borderColor: colors.border,
-                  color: colors.text,
-                  colorScheme: "dark",
-                }}
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>
-                Fin
-              </label>
-              <input
-                type="date"
-                value={end}
-                onChange={(e) => setEnd(e.target.value)}
-                className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
-                style={{
-                  background: colors.surfaceHover,
-                  borderColor: colors.border,
-                  color: colors.text,
-                  colorScheme: "dark",
-                }}
-              />
-            </div>
+            {[["Inicio", start, setStart], ["Fin", end, setEnd]].map(([lbl, val, set]) => (
+              <div key={lbl as string}>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>{lbl as string}</label>
+                <input type="date" value={val as string} onChange={e => (set as (v: string) => void)(e.target.value)} className={inp} style={{ ...inpStyle, colorScheme: "dark" }} />
+              </div>
+            ))}
           </div>
-
-          {/* Progress */}
           <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="text-xs font-medium" style={{ color: colors.textSecondary }}>
-                Avance
-              </label>
-              <span className="text-xs font-semibold" style={{ color: colors.text }}>
-                {progress}%
-              </span>
+            <div className="flex justify-between mb-1.5">
+              <label className="text-xs font-medium" style={{ color: colors.textSecondary }}>Avance</label>
+              <span className="text-xs font-semibold" style={{ color: colors.text }}>{progress}%</span>
             </div>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={progress}
-              onChange={(e) => setProgress(Number(e.target.value))}
-              className="w-full"
-              style={{ accentColor: colors.accent }}
-            />
+            <input type="range" min={0} max={100} value={progress} onChange={e => setProgress(+e.target.value)} className="w-full" style={{ accentColor: colors.accent }} />
           </div>
-
-          {/* Status */}
           <div>
-            <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>
-              Estado
-            </label>
-            <select
-              value={status}
-              onChange={(e) => setStatus(e.target.value as TaskStatus)}
-              className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
-              style={{
-                background: colors.surfaceHover,
-                borderColor: colors.border,
-                color: colors.text,
-                colorScheme: "dark",
-              }}
-            >
-              {Object.entries(TASK_STATUS).map(([key, val]) => (
-                <option key={key} value={key}>
-                  {val.label}
-                </option>
-              ))}
+            <label className="block text-xs font-medium mb-1.5" style={{ color: colors.textSecondary }}>Estado</label>
+            <select value={status} onChange={e => setStatus(e.target.value as TaskStatus)} className={inp} style={{ ...inpStyle, colorScheme: "dark" }}>
+              {Object.entries(TASK_STATUS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
             </select>
           </div>
         </div>
 
-        {/* Actions */}
-        <div className="flex items-center justify-between mt-6">
-          {isEdit ? (
-            <button
-              onClick={handleDelete}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-opacity hover:opacity-80"
-              style={{ color: colors.red, background: colors.redSoft }}
-            >
-              <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
-              Eliminar
+        <div className="flex items-center justify-between mt-5">
+          {mode === "edit" && task ? (
+            <button onClick={() => { deleteTask(projectId, task.id); onClose(); }} className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium" style={{ color: colors.red, background: colors.redSoft }}>
+              <Trash2 className="h-3.5 w-3.5" /> Eliminar
             </button>
           ) : (
-            <button
-              onClick={onClose}
-              className="px-3 py-2 rounded-xl text-xs font-medium"
-              style={{ color: colors.textSecondary, background: colors.surfaceHover }}
-            >
-              Cancelar
-            </button>
+            <button onClick={onClose} className="px-3 py-2 rounded-xl text-xs" style={{ color: colors.textSecondary, background: colors.surfaceHover }}>Cancelar</button>
           )}
-          <button
-            onClick={handleSave}
-            className="px-5 py-2 rounded-xl text-xs font-medium text-white transition-opacity hover:opacity-80"
-            style={{ background: colors.accent }}
-          >
-            {isEdit ? "Guardar" : "Crear Tarea"}
+          <button onClick={save} className="px-5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: colors.accent }}>
+            {mode === "edit" ? "Guardar" : "Crear Tarea"}
           </button>
         </div>
       </div>
@@ -348,334 +175,242 @@ function TaskModal({
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
+interface DragState { type: "move" | "resize-left" | "resize-right"; taskId: string; startX: number; origStart: string; origEnd: string }
+interface ModalState { mode: "add" | "edit"; task?: Task }
+interface Row { type: "group" | "task"; groupName?: string; task?: Task; color?: string }
+
 export default function GanttPage() {
-  const params = useParams();
-  const id = params?.id as string;
-
+  const params  = useParams();
+  const id      = params?.id as string;
   const { projects, updateTask } = useProjectStore();
-  const project = projects.find((p) => p.id === id);
-  const tasks = project?.tasks ?? [];
+  const project = projects.find(p => p.id === id);
+  const tasks   = project?.tasks ?? [];
 
-  const [zoom, setZoom] = useState<number>(GANTT.DEFAULT_ZOOM);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const [modal, setModal] = useState<ModalState | null>(null);
+  const [zoom,      setZoom]      = useState<number>(GANTT.DEFAULT_ZOOM);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [modal,     setModal]     = useState<ModalState | null>(null);
 
-  const rightPanelRef = useRef<HTMLDivElement>(null);
-  const leftPanelRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<DragState | null>(null);
-  const syncingRef = useRef(false);
+  const rightRef  = useRef<HTMLDivElement>(null);
+  const leftRef   = useRef<HTMLDivElement>(null);
+  const dragRef   = useRef<DragState | null>(null);
+  const syncing   = useRef(false);
 
-  // Build derived data
-  const range = buildRange(tasks);
+  const range  = buildRange(tasks);
   const months = buildMonths(range);
+  const weeks  = buildWeeks(range);
   const groups = getGroups(tasks);
-  const today = todayISO();
+  const today  = todayISO();
   const todayOff = diffDays(range.start, today);
+  const totalW   = range.days * zoom;
 
-  // ── Scroll sync ────────────────────────────────────────────────────────────
+  // ── Rows ────────────────────────────────────────────────────────────────────
 
-  const handleRightScroll = useCallback(() => {
-    if (syncingRef.current) return;
-    const right = rightPanelRef.current;
-    const left = leftPanelRef.current;
-    if (!right || !left) return;
-    syncingRef.current = true;
-    left.scrollTop = right.scrollTop;
-    syncingRef.current = false;
-  }, []);
-
-  // ── Auto-scroll to today ──────────────────────────────────────────────────
-
-  useEffect(() => {
-    const panel = rightPanelRef.current;
-    if (!panel) return;
-    const offset = todayOff * zoom - panel.clientWidth / 2 + 100;
-    panel.scrollLeft = Math.max(0, offset);
-  }, [todayOff, zoom]);
-
-  // ── Drag / Resize ─────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      const drag = dragRef.current;
-      if (!drag || !project) return;
-      const rawDelta = e.clientX - drag.startX;
-      const delta = Math.round(rawDelta / zoom);
-      if (delta === 0) return;
-
-      let newStart = drag.origStart;
-      let newEnd = drag.origEnd;
-
-      if (drag.type === "move") {
-        newStart = addDays(drag.origStart, delta);
-        newEnd = addDays(drag.origEnd, delta);
-      } else if (drag.type === "resize-left") {
-        newStart = addDays(drag.origStart, delta);
-        // Ensure at least 1 day
-        if (newStart >= drag.origEnd) newStart = addDays(drag.origEnd, -1);
-      } else if (drag.type === "resize-right") {
-        newEnd = addDays(drag.origEnd, delta);
-        if (newEnd <= drag.origStart) newEnd = addDays(drag.origStart, 1);
-      }
-
-      updateTask(project.id, drag.taskId, { start: newStart, end: newEnd });
-    };
-
-    const onMouseUp = () => {
-      dragRef.current = null;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-  }, [zoom, project, updateTask]);
-
-  const startDrag = useCallback(
-    (
-      e: React.MouseEvent,
-      type: DragState["type"],
-      task: Task
-    ) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dragRef.current = {
-        type,
-        taskId: task.id,
-        startX: e.clientX,
-        origStart: task.start,
-        origEnd: task.end,
-      };
-      document.body.style.userSelect = "none";
-      if (type === "move") document.body.style.cursor = "grabbing";
-      else document.body.style.cursor = "ew-resize";
-    },
-    []
-  );
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  if (!project) {
-    return (
-      <div
-        className="flex items-center justify-center h-64 text-sm"
-        style={{ color: colors.textTertiary }}
-      >
-        Proyecto no encontrado
-      </div>
-    );
-  }
-
-  const totalWidth = range.days * zoom;
-
-  const toggleGroup = (groupName: string) => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(groupName)) next.delete(groupName);
-      else next.add(groupName);
-      return next;
-    });
-  };
-
-  // Build flat row list for synchronized scrolling
-  interface RowItem {
-    type: "group" | "task";
-    groupName?: string;
-    task?: Task;
-    groupColor?: string;
-  }
-
-  const rows: RowItem[] = [];
-  for (const groupName of groups) {
-    const groupColor = getGroupColor(groups, groupName);
-    const groupTasks = tasks.filter((t) => t.group === groupName);
-    rows.push({ type: "group", groupName, groupColor });
-    if (!collapsedGroups.has(groupName)) {
-      for (const task of groupTasks) {
-        rows.push({ type: "task", task, groupColor });
+  const rows: Row[] = [];
+  for (const g of groups) {
+    const c = groupColor(groups, g);
+    rows.push({ type: "group", groupName: g, color: c });
+    if (!collapsed.has(g)) {
+      for (const t of tasks.filter(t => t.group === g)) {
+        rows.push({ type: "task", task: t, color: c, groupName: g });
       }
     }
   }
+  const bodyH = rows.length * GANTT.ROW_HEIGHT;
 
-  const bodyHeight = rows.length * GANTT.ROW_HEIGHT;
+  // ── Scroll sync ─────────────────────────────────────────────────────────────
+
+  const onRightScroll = useCallback(() => {
+    if (syncing.current) return;
+    const r = rightRef.current; const l = leftRef.current;
+    if (!r || !l) return;
+    syncing.current = true; l.scrollTop = r.scrollTop; syncing.current = false;
+  }, []);
+
+  // ── Scroll to today ─────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const p = rightRef.current;
+    if (!p) return;
+    p.scrollLeft = Math.max(0, todayOff * zoom - p.clientWidth / 2 + 80);
+  }, [todayOff, zoom]);
+
+  // ── Drag ────────────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d || !project) return;
+      const delta = Math.round((e.clientX - d.startX) / zoom);
+      if (!delta) return;
+      let s = d.origStart, e2 = d.origEnd;
+      if (d.type === "move")         { s = addDays(d.origStart, delta); e2 = addDays(d.origEnd, delta); }
+      else if (d.type === "resize-left")  { s = addDays(d.origStart, delta); if (s >= d.origEnd) s = addDays(d.origEnd, -1); }
+      else if (d.type === "resize-right") { e2 = addDays(d.origEnd, delta); if (e2 <= d.origStart) e2 = addDays(d.origStart, 1); }
+      updateTask(project.id, d.taskId, { start: s, end: e2 });
+    };
+    const up = () => { dragRef.current = null; document.body.style.cursor = ""; document.body.style.userSelect = ""; };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+    return () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
+  }, [zoom, project, updateTask]);
+
+  const startDrag = useCallback((e: React.MouseEvent, type: DragState["type"], task: Task) => {
+    e.preventDefault(); e.stopPropagation();
+    dragRef.current = { type, taskId: task.id, startX: e.clientX, origStart: task.start, origEnd: task.end };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = type === "move" ? "grabbing" : "ew-resize";
+  }, []);
+
+  if (!project) return null;
+
+  // ── Group span helpers ───────────────────────────────────────────────────────
+
+  const groupSpan = (g: string) => {
+    const ts = tasks.filter(t => t.group === g);
+    if (!ts.length) return null;
+    const s = ts.map(t => t.start).sort()[0];
+    const e = ts.map(t => t.end).sort().at(-1)!;
+    return { start: s, end: e };
+  };
 
   return (
     <div
       className="flex flex-col"
-      style={{
-        height: "calc(100vh - 110px)",
-        background: colors.bg,
-        overflow: "hidden",
-      }}
+      style={{ height: "calc(100vh - 192px)", background: colors.bg, overflow: "hidden" }}
     >
       {/* ── Toolbar ── */}
       <div
-        className="flex items-center gap-3 px-4 py-2.5 border-b shrink-0"
-        style={{ borderColor: colors.border, background: colors.surface }}
+        className="h-14 flex items-center gap-2 px-4 shrink-0 border-b"
+        style={{ background: colors.surface, borderColor: colors.border }}
       >
-        {/* Zoom controls */}
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setZoom((z) => Math.max(GANTT.MIN_ZOOM, z - 1))}
-            className="rounded-lg p-1.5 transition-colors"
-            style={{ color: colors.textSecondary, background: colors.surfaceHover }}
-            title="Alejar"
-          >
-            <ZoomOut className="h-3.5 w-3.5" strokeWidth={2} />
-          </button>
-          <span
-            className="text-xs font-mono w-16 text-center"
-            style={{ color: colors.textTertiary }}
-          >
-            {zoom}px/día
-          </span>
-          <button
-            onClick={() => setZoom((z) => Math.min(GANTT.MAX_ZOOM, z + 1))}
-            className="rounded-lg p-1.5 transition-colors"
-            style={{ color: colors.textSecondary, background: colors.surfaceHover }}
-            title="Acercar"
-          >
-            <ZoomIn className="h-3.5 w-3.5" strokeWidth={2} />
-          </button>
-        </div>
-
-        {/* Today button */}
+        {/* Zoom out */}
         <button
-          onClick={() => {
-            const panel = rightPanelRef.current;
-            if (!panel) return;
-            const offset = todayOff * zoom - panel.clientWidth / 2 + 100;
-            panel.scrollLeft = Math.max(0, offset);
-          }}
-          className="text-xs font-medium rounded-lg px-3 py-1.5 transition-colors"
-          style={{ color: colors.accent, background: colors.accentSoft }}
+          onClick={() => setZoom(z => Math.max(GANTT.MIN_ZOOM, z - 1))}
+          className="h-9 w-9 flex items-center justify-center rounded-xl transition-colors"
+          style={{ background: colors.surfaceHover, color: colors.textSecondary }}
         >
+          <ZoomOut className="h-4 w-4" strokeWidth={2} />
+        </button>
+        {/* Zoom in */}
+        <button
+          onClick={() => setZoom(z => Math.min(GANTT.MAX_ZOOM, z + 1))}
+          className="h-9 w-9 flex items-center justify-center rounded-xl transition-colors"
+          style={{ background: colors.surfaceHover, color: colors.textSecondary }}
+        >
+          <ZoomIn className="h-4 w-4" strokeWidth={2} />
+        </button>
+
+        {/* Today */}
+        <button
+          onClick={() => { const p = rightRef.current; if (p) p.scrollLeft = Math.max(0, todayOff * zoom - p.clientWidth / 2 + 80); }}
+          className="flex items-center gap-1.5 h-9 px-4 rounded-xl text-sm font-medium transition-colors"
+          style={{ background: colors.surfaceHover, color: colors.textSecondary }}
+        >
+          <Clock className="h-3.5 w-3.5" strokeWidth={2} />
           Hoy
         </button>
 
         <div className="flex-1" />
 
-        {/* New task */}
+        {/* Nueva Tarea */}
         <button
           onClick={() => setModal({ mode: "add" })}
-          className="flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-80"
+          className="flex items-center gap-2 h-9 px-5 rounded-xl text-sm font-semibold text-white transition-opacity hover:opacity-85"
           style={{ background: colors.accent }}
         >
-          <Plus className="h-3.5 w-3.5" strokeWidth={2.5} />
+          <Plus className="h-4 w-4" strokeWidth={2.5} />
           Nueva Tarea
         </button>
       </div>
 
       {/* ── Main area ── */}
       <div className="flex flex-1 min-h-0">
-        {/* ── Left panel (task list) ── */}
+
+        {/* ── Left panel ── */}
         <div
           className="shrink-0 flex flex-col border-r"
-          style={{
-            width: 240,
-            borderColor: colors.border,
-            background: colors.bg,
-          }}
+          style={{ width: TASK_PANEL_W, borderColor: colors.border, background: colors.bg }}
         >
-          {/* Header */}
+          {/* Column headers */}
           <div
-            className="shrink-0 flex items-end px-4 pb-2 border-b"
-            style={{
-              height: GANTT.HEADER_HEIGHT,
-              borderColor: colors.border,
-              background: colors.surface,
-            }}
+            className="shrink-0 flex items-end border-b"
+            style={{ height: HDR_H, borderColor: colors.border, background: colors.surface }}
           >
-            <span
-              className="text-[11px] font-semibold uppercase tracking-widest"
-              style={{ color: colors.textTertiary }}
+            <div
+              className="flex items-center pb-2 px-3 gap-0 w-full"
+              style={{ color: colors.textTertiary, fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}
             >
-              Tarea
-            </span>
+              <span style={{ width: COL_NAME_W }}>Tarea</span>
+              <span style={{ width: COL_DATE_W }}>Inicio</span>
+              <span style={{ width: COL_DATE_W }}>Fin</span>
+            </div>
           </div>
 
           {/* Rows */}
-          <div
-            ref={leftPanelRef}
-            className="flex-1 overflow-hidden"
-            style={{ overflowY: "hidden" }}
-          >
-            <div style={{ height: bodyHeight }}>
+          <div ref={leftRef} className="flex-1 overflow-hidden">
+            <div style={{ height: bodyH }}>
               {rows.map((row, i) => {
                 if (row.type === "group") {
-                  const groupTasks = tasks.filter((t) => t.group === row.groupName);
-                  const isCollapsed = collapsedGroups.has(row.groupName!);
+                  const gt = tasks.filter(t => t.group === row.groupName);
+                  const isC = collapsed.has(row.groupName!);
                   return (
                     <div
-                      key={`group-${row.groupName}`}
-                      className="flex items-center gap-2 px-4 cursor-pointer select-none"
+                      key={`gl-${row.groupName}`}
+                      className="flex items-center cursor-pointer select-none"
                       style={{
                         height: GANTT.ROW_HEIGHT,
                         background: colors.surfaceHover,
                         borderBottom: `1px solid ${colors.border}`,
+                        borderLeft: `3px solid ${row.color}`,
                       }}
-                      onClick={() => toggleGroup(row.groupName!)}
+                      onClick={() => setCollapsed(p => { const n = new Set(p); n.has(row.groupName!) ? n.delete(row.groupName!) : n.add(row.groupName!); return n; })}
                     >
-                      {isCollapsed ? (
-                        <ChevronRight className="h-3 w-3 shrink-0" style={{ color: colors.textTertiary }} strokeWidth={2} />
-                      ) : (
-                        <ChevronDown className="h-3 w-3 shrink-0" style={{ color: colors.textTertiary }} strokeWidth={2} />
-                      )}
-                      <div
-                        className="h-2 w-2 rounded-full shrink-0"
-                        style={{ background: row.groupColor }}
-                      />
-                      <span
-                        className="text-xs font-semibold flex-1 truncate"
-                        style={{ color: colors.text }}
-                      >
+                      <span className="px-2" style={{ color: colors.textTertiary, fontSize: 11 }}>
+                        {isC ? "›" : "⌄"}
+                      </span>
+                      <span className="text-xs font-bold flex-1 truncate" style={{ color: colors.text }}>
                         {row.groupName}
                       </span>
-                      <span
-                        className="text-[10px] shrink-0"
-                        style={{ color: colors.textTertiary }}
-                      >
-                        {groupTasks.length}
+                      <span className="text-xs pr-3" style={{ color: colors.textTertiary }}>
+                        {gt.length}
                       </span>
                     </div>
                   );
                 }
 
                 const task = row.task!;
-                const statusCfg = TASK_STATUS[task.status];
+                const st   = TASK_STATUS[task.status];
                 return (
                   <div
-                    key={`task-${task.id}`}
-                    className="flex items-center gap-2 px-4 cursor-pointer transition-colors"
+                    key={`tl-${task.id}`}
+                    className="flex items-center cursor-pointer transition-colors"
                     style={{
                       height: GANTT.ROW_HEIGHT,
                       borderBottom: `1px solid ${colors.border}`,
+                      paddingLeft: 12,
                     }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLDivElement).style.background = colors.surfaceHover;
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLDivElement).style.background = "transparent";
-                    }}
+                    onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = colors.surfaceHover}
+                    onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = "transparent"}
                     onClick={() => setModal({ mode: "edit", task })}
                   >
-                    <div className="w-3 shrink-0" />
-                    <span
-                      className="flex-1 text-xs truncate"
-                      style={{ color: colors.textSecondary }}
-                    >
-                      {task.name}
-                    </span>
-                    <span
-                      className="shrink-0 text-[10px] rounded-full px-1.5 py-0.5 font-medium"
-                      style={{ color: statusCfg.color, background: statusCfg.bg }}
-                    >
-                      {task.progress}%
-                    </span>
+                    <div style={{ width: COL_NAME_W - 12 }}>
+                      <p className="text-xs font-medium truncate" style={{ color: colors.text }}>
+                        {task.name}
+                      </p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span
+                          className="inline-block rounded-full px-1.5 py-0.5 text-[9px] font-semibold"
+                          style={{ color: st.color, background: st.bg }}
+                        >
+                          {st.label}
+                        </span>
+                        <span className="text-[10px]" style={{ color: colors.textTertiary }}>
+                          {task.progress}%
+                        </span>
+                      </div>
+                    </div>
+                    <span className="text-[10px]" style={{ width: COL_DATE_W, color: colors.textSecondary }}>{fmtD(task.start)}</span>
+                    <span className="text-[10px]" style={{ width: COL_DATE_W, color: colors.textSecondary }}>{fmtD(task.end)}</span>
                   </div>
                 );
               })}
@@ -685,103 +420,86 @@ export default function GanttPage() {
 
         {/* ── Right panel (timeline) ── */}
         <div
-          ref={rightPanelRef}
+          ref={rightRef}
           className="flex-1 overflow-auto"
-          onScroll={handleRightScroll}
+          onScroll={onRightScroll}
         >
-          <div style={{ width: totalWidth, minWidth: totalWidth }}>
+          <div style={{ width: totalW, minWidth: totalW }}>
+
             {/* Timeline header */}
             <div
               className="sticky top-0 z-10 border-b"
-              style={{
-                height: GANTT.HEADER_HEIGHT,
-                borderColor: colors.border,
-                background: colors.surface,
-                position: "sticky",
-              }}
+              style={{ height: HDR_H, background: colors.surface, borderColor: colors.border }}
             >
-              {/* Month labels */}
-              <div className="relative" style={{ height: 32 }}>
-                {months.map((month, i) => (
+              {/* Month row */}
+              <div className="relative" style={{ height: HDR_MONTH_H }}>
+                {months.map((m, i) => (
                   <div
                     key={i}
-                    className="absolute top-0 flex items-center px-2"
+                    className="absolute flex items-center px-3"
                     style={{
-                      left: month.startOff * zoom,
-                      width: month.days * zoom,
-                      height: 32,
+                      left: m.startOff * zoom,
+                      width: m.days * zoom,
+                      height: HDR_MONTH_H,
                       borderLeft: `1px solid ${colors.border}`,
                     }}
                   >
-                    <span
-                      className="text-[11px] font-semibold capitalize truncate"
-                      style={{ color: colors.textSecondary }}
-                    >
-                      {month.label}
+                    <span className="text-xs font-bold capitalize truncate" style={{ color: colors.textSecondary }}>
+                      {m.label}
                     </span>
                   </div>
                 ))}
               </div>
 
-              {/* Day numbers row */}
-              <div
-                className="relative flex items-center"
-                style={{ height: 32, overflowX: "hidden" }}
-              >
-                {Array.from({ length: range.days }).map((_, dayIdx) => {
-                  const date = parseISO(addDays(range.start, dayIdx));
-                  const dom = date.getDate();
-                  const dayOfWeek = date.getDay();
-                  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-                  // Show label only for multiples of 7 or when zoom is big
-                  const showLabel = zoom >= 6 ? true : dom === 1 || dom % 7 === 1;
-                  if (!showLabel) return null;
-                  return (
-                    <span
-                      key={dayIdx}
-                      className="absolute text-[9px] text-center"
-                      style={{
-                        left: dayIdx * zoom,
-                        width: zoom * (zoom >= 6 ? 1 : 7),
-                        color: isWeekend ? colors.textTertiary : colors.textTertiary,
-                        opacity: isWeekend ? 0.5 : 0.8,
-                        top: "50%",
-                        transform: "translateY(-50%)",
-                      }}
-                    >
-                      {dom}
+              {/* Week row */}
+              <div className="relative" style={{ height: HDR_WEEK_H }}>
+                {weeks.map((w, i) => (
+                  <div
+                    key={i}
+                    className="absolute flex items-center px-1"
+                    style={{
+                      left: w.offset * zoom,
+                      height: HDR_WEEK_H,
+                      borderLeft: `1px solid ${colors.border}`,
+                    }}
+                  >
+                    <span className="text-[10px]" style={{ color: colors.textTertiary, whiteSpace: "nowrap" }}>
+                      {w.label}
                     </span>
-                  );
-                })}
+                  </div>
+                ))}
+
+                {/* HOY pill */}
+                {todayOff >= 0 && todayOff <= range.days && (
+                  <div
+                    className="absolute flex items-center justify-center rounded-full px-2 py-0.5 text-[10px] font-bold text-white z-20"
+                    style={{
+                      left: todayOff * zoom - 18,
+                      top: 4,
+                      background: colors.red,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    HOY
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Rows body */}
-            <div style={{ height: bodyHeight, position: "relative" }}>
-              {/* Month boundary lines */}
-              {months.map((month, i) => (
-                <div
-                  key={i}
-                  className="absolute inset-y-0 pointer-events-none"
-                  style={{
-                    left: month.startOff * zoom,
-                    width: 1,
-                    background: colors.border,
-                    opacity: 0.5,
-                  }}
-                />
+            {/* Body */}
+            <div style={{ height: bodyH, position: "relative" }}>
+
+              {/* Month vertical lines */}
+              {months.map((m, i) => (
+                <div key={i} className="absolute inset-y-0 pointer-events-none"
+                  style={{ left: m.startOff * zoom, width: 1, background: colors.border, opacity: 0.4 }} />
               ))}
 
-              {/* Today line */}
+              {/* Today vertical line (red) */}
               {todayOff >= 0 && todayOff <= range.days && (
                 <div
                   className="absolute inset-y-0 pointer-events-none z-20"
-                  style={{
-                    left: todayOff * zoom,
-                    width: 2,
-                    background: colors.accent,
-                    opacity: 0.7,
-                  }}
+                  style={{ left: todayOff * zoom, width: 2, background: colors.red, opacity: 0.8 }}
                 />
               )}
 
@@ -790,83 +508,112 @@ export default function GanttPage() {
                 const top = rowIdx * GANTT.ROW_HEIGHT;
 
                 if (row.type === "group") {
+                  const span = groupSpan(row.groupName!);
+                  const spanLeft = span ? diffDays(range.start, span.start) * zoom : 0;
+                  const spanW    = span ? Math.max(diffDays(span.start, span.end) * zoom, 8) : 0;
+                  const cy       = top + GANTT.ROW_HEIGHT / 2;
+
                   return (
                     <div
-                      key={`grow-${row.groupName}`}
+                      key={`gr-${row.groupName}`}
                       className="absolute w-full"
-                      style={{
-                        top,
-                        height: GANTT.ROW_HEIGHT,
-                        background: colors.surfaceHover,
-                        borderBottom: `1px solid ${colors.border}`,
-                      }}
-                    />
+                      style={{ top, height: GANTT.ROW_HEIGHT, background: colors.surfaceHover, borderBottom: `1px solid ${colors.border}` }}
+                    >
+                      {span && (
+                        <>
+                          {/* Thin group summary bar */}
+                          <div
+                            className="absolute rounded-full"
+                            style={{
+                              left:   spanLeft,
+                              width:  spanW,
+                              top:    GANTT.ROW_HEIGHT / 2 - 3,
+                              height: 6,
+                              background: `${row.color}50`,
+                              border: `1px solid ${row.color}80`,
+                            }}
+                          />
+                          {/* Diamond at end */}
+                          <div
+                            className="absolute"
+                            style={{
+                              left:      spanLeft + spanW - 7,
+                              top:       cy - 7,
+                              width:     14,
+                              height:    14,
+                              background: row.color,
+                              transform: "rotate(45deg)",
+                              borderRadius: 2,
+                            }}
+                          />
+                        </>
+                      )}
+                    </div>
                   );
                 }
 
-                const task = row.task!;
-                const statusCfg = TASK_STATUS[task.status];
-                const barLeft = diffDays(range.start, task.start) * zoom;
-                const barWidth = Math.max(diffDays(task.start, task.end) * zoom, 4);
-                const barTop = top + (GANTT.ROW_HEIGHT - GANTT.BAR_HEIGHT) / 2;
+                // Task row
+                const task     = row.task!;
+                const gc       = row.color!;
+                const barLeft  = diffDays(range.start, task.start) * zoom;
+                const barW     = Math.max(diffDays(task.start, task.end) * zoom, 8);
+                const barTop   = top + (GANTT.ROW_HEIGHT - GANTT.BAR_HEIGHT) / 2;
 
                 return (
                   <div
-                    key={`trow-${task.id}`}
+                    key={`tr-${task.id}`}
                     className="absolute w-full"
-                    style={{
-                      top,
-                      height: GANTT.ROW_HEIGHT,
-                      borderBottom: `1px solid ${colors.border}`,
-                    }}
+                    style={{ top, height: GANTT.ROW_HEIGHT, borderBottom: `1px solid ${colors.border}` }}
                   >
-                    {/* Task bar */}
+                    {/* Bar */}
                     <div
-                      className="absolute rounded-lg overflow-hidden select-none"
+                      className="absolute rounded-md select-none overflow-hidden"
                       style={{
-                        left: barLeft,
-                        top: barTop - top,
-                        width: barWidth,
+                        left:   barLeft,
+                        top:    barTop - top,
+                        width:  barW,
                         height: GANTT.BAR_HEIGHT,
-                        background: statusCfg.bg,
-                        border: `1px solid ${statusCfg.color}40`,
+                        background: `${gc}28`,
+                        border: `1.5px solid ${gc}60`,
                         cursor: "grab",
                       }}
-                      onMouseDown={(e) => startDrag(e, "move", task)}
+                      onMouseDown={e => startDrag(e, "move", task)}
                       onDoubleClick={() => setModal({ mode: "edit", task })}
                     >
                       {/* Progress fill */}
                       <div
-                        className="absolute inset-y-0 left-0"
-                        style={{
-                          width: `${task.progress}%`,
-                          background: `${statusCfg.color}70`,
-                          borderRadius: "inherit",
-                        }}
+                        className="absolute inset-y-0 left-0 rounded-md"
+                        style={{ width: `${task.progress}%`, background: `${gc}90` }}
                       />
-
-                      {/* Label */}
-                      {barWidth > 40 && (
+                      {/* Task name */}
+                      {barW > 36 && (
                         <span
-                          className="absolute inset-0 flex items-center px-2 text-[10px] font-medium truncate pointer-events-none"
-                          style={{ color: statusCfg.color, zIndex: 1 }}
+                          className="absolute inset-0 flex items-center px-2 text-[11px] font-semibold truncate pointer-events-none z-10"
+                          style={{ color: "#fff" }}
                         >
                           {task.name}
                         </span>
                       )}
-
-                      {/* Left resize handle */}
+                      {/* Progress % */}
+                      {barW > 60 && (
+                        <span
+                          className="absolute right-1.5 inset-y-0 flex items-center text-[10px] font-bold pointer-events-none z-10"
+                          style={{ color: "#fff" }}
+                        >
+                          {task.progress}%
+                        </span>
+                      )}
+                      {/* Left resize */}
                       <div
-                        className="absolute inset-y-0 left-0 z-10"
+                        className="absolute inset-y-0 left-0 z-20"
                         style={{ width: 8, cursor: "ew-resize" }}
-                        onMouseDown={(e) => startDrag(e, "resize-left", task)}
+                        onMouseDown={e => startDrag(e, "resize-left", task)}
                       />
-
-                      {/* Right resize handle */}
+                      {/* Right resize */}
                       <div
-                        className="absolute inset-y-0 right-0 z-10"
+                        className="absolute inset-y-0 right-0 z-20"
                         style={{ width: 8, cursor: "ew-resize" }}
-                        onMouseDown={(e) => startDrag(e, "resize-right", task)}
+                        onMouseDown={e => startDrag(e, "resize-right", task)}
                       />
                     </div>
                   </div>
@@ -877,10 +624,11 @@ export default function GanttPage() {
         </div>
       </div>
 
-      {/* ── Modal ── */}
+      {/* Modal */}
       {modal && (
         <TaskModal
-          modalState={modal}
+          mode={modal.mode}
+          task={modal.task}
           projectId={id}
           existingGroups={groups}
           onClose={() => setModal(null)}
