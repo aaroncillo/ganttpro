@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useProjectStore } from "@/stores/useProjectStore";
-import { colors, TASK_STATUS } from "@/lib/constants";
+import { colors } from "@/lib/constants";
 import { formatShort, formatMoney, calcProjectProgress } from "@/lib/utils";
 import type { Project } from "@/types";
 import {
@@ -114,11 +114,9 @@ function StatCard({
 
 function ProjectCard({
   project,
-  isActive,
   onClick,
 }: {
   project: Project;
-  isActive: boolean;
   onClick: () => void;
 }) {
   const statusUI = PROJECT_STATUS_UI[project.status];
@@ -136,8 +134,8 @@ function ProjectCard({
       onClick={onClick}
       className="w-full rounded-2xl border p-5 text-left transition-all"
       style={{
-        background: isActive ? colors.surfaceActive : colors.surface,
-        borderColor: isActive ? colors.borderLight : colors.border,
+        background: colors.surface,
+        borderColor: colors.border,
       }}
     >
       {/* Header row */}
@@ -171,11 +169,8 @@ function ProjectCard({
             {formatMoney(project.value)}
           </span>
           <ChevronRight
-            className="h-4 w-4 transition-transform"
-            style={{
-              color: isActive ? colors.text : colors.textTertiary,
-              transform: isActive ? "rotate(90deg)" : "rotate(0)",
-            }}
+            className="h-4 w-4"
+            style={{ color: colors.textTertiary }}
             strokeWidth={1.5}
           />
         </div>
@@ -250,57 +245,6 @@ function ProjectCard({
         </div>
       </div>
 
-      {/* Expanded: task breakdown */}
-      {isActive && (
-        <div
-          className="mt-4 pt-4 border-t"
-          style={{ borderColor: colors.border }}
-        >
-          <p
-            className="mb-2 text-[11px] font-semibold uppercase tracking-widest"
-            style={{ color: colors.textTertiary }}
-          >
-            Tareas
-          </p>
-          <div className="space-y-1.5">
-            {project.tasks.map((task) => {
-              const taskSt = TASK_STATUS[task.status];
-              return (
-                <div key={task.id} className="flex items-center gap-3">
-                  <div
-                    className="h-1 w-1 rounded-full shrink-0"
-                    style={{ background: taskSt?.color ?? colors.textTertiary }}
-                  />
-                  <span
-                    className="flex-1 text-xs truncate"
-                    style={{ color: colors.textSecondary }}
-                  >
-                    {task.name}
-                  </span>
-                  <div
-                    className="h-1 w-14 rounded-full overflow-hidden"
-                    style={{ background: colors.border }}
-                  >
-                    <div
-                      className="h-full rounded-full"
-                      style={{
-                        width: `${task.progress}%`,
-                        background: taskSt?.color ?? colors.textTertiary,
-                      }}
-                    />
-                  </div>
-                  <span
-                    className="text-[10px] w-7 text-right shrink-0"
-                    style={{ color: colors.textTertiary }}
-                  >
-                    {task.progress}%
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
     </button>
   );
 }
@@ -309,7 +253,7 @@ function ProjectCard({
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { projects, activeProjectId, setActiveProject } = useProjectStore();
+  const { projects } = useProjectStore();
 
   // Computed stats
   const totalValue = projects.reduce((s, p) => s + p.value, 0);
@@ -507,12 +451,7 @@ export default function DashboardPage() {
                 <ProjectCard
                   key={project.id}
                   project={project}
-                  isActive={activeProjectId === project.id}
-                  onClick={() =>
-                    setActiveProject(
-                      activeProjectId === project.id ? null : project.id
-                    )
-                  }
+                  onClick={() => router.push(`/project/${project.id}/gantt`)}
                 />
               ))}
             </div>
